@@ -48,6 +48,8 @@ module Rack
 
     # helper methods to read timeout properties. Ensure they're always positive numbers or false. When set to false (or 0), their behaviour is disabled.
     def read_timeout_property value, default
+      return value if value.respond_to?(:call)
+
       case value
       when nil   ; read_timeout_property default, default
       when false ; false
@@ -58,12 +60,24 @@ module Rack
       end
     end
 
-    attr_reader \
-      :service_timeout,   # How long the application can take to complete handling the request once it's passed down to it.
-      :wait_timeout,      # How long the request is allowed to have waited before reaching rack. If exceeded, the request is 'expired', i.e. dropped entirely without being passed down to the application.
-      :wait_overtime,     # Additional time over @wait_timeout for requests with a body, like POST requests. These may take longer to be received by the server before being passed down to the application, but should not be expired.
-      :service_past_wait  # when false, reduces the request's computed timeout from the service_timeout value if the complete request lifetime (wait + service) would have been longer than wait_timeout (+ wait_overtime when applicable). When true, always uses the service_timeout value. we default to false under the assumption that the router would drop a request that's not responded within wait_timeout, thus being there no point in servicing beyond seconds_service_left (see code further down) up until service_timeout.
-
+    # @param service_timeout [Number or Proc]:  How long the application can take
+    #   to complete handling the request once it's passed down to it.
+    #   Default: ENV['RACK_TIMEOUT_SERVICE_TIMEOUT]
+    # @param wait_timeout [Number] How long the request is allowed to have waited
+    #   before reaching rack. If exceeded, the request is 'expired', i.e. dropped
+    #   entirely without being passed down to the application.
+    # @param wait_overtime [Number]: Additional time over @wait_timeout for
+    #   requests with a body, like POST requests. These may take longer to be
+    #   received by the server before being passed down to the application, but
+    #   should not be expired.
+    # @param service_past_wait [true or false]: when false, reduces the request's
+    #   computed timeout from the service_timeout value if the complete request
+    #   lifetime (wait + service) would have been longer than
+    #   wait_timeout (+ wait_overtime when applicable). When true, always uses
+    #   the service_timeout value. we default to false under the assumption that
+    #   the router would drop a request that's not responded within wait_timeout,
+    #   thus being there no point in servicing beyond seconds_service_left
+    #   (see code further down) up until service_timeout.
     def initialize(app, service_timeout:nil, wait_timeout:nil, wait_overtime:nil, service_past_wait:"not_specified")
       @service_timeout   = read_timeout_property service_timeout, ENV.fetch("RACK_TIMEOUT_SERVICE_TIMEOUT", 15).to_i
       @wait_timeout      = read_timeout_property wait_timeout,    ENV.fetch("RACK_TIMEOUT_WAIT_TIMEOUT", 30).to_i
@@ -72,11 +86,15 @@ module Rack
       @app = app
     end
 
-
     RT = self # shorthand reference
     def call(env)
       info      = (env[ENV_INFO_KEY] ||= RequestDetails.new)
       info.id ||= env[HTTP_X_REQUEST_ID] || env[ACTION_DISPATCH_REQUEST_ID] || SecureRandom.uuid
+
+      wait_timeout = read_config(:wait_timeout, env)
+      wait_overtime = read_config(:wait_overtime, env)
+      service_past_wait = read_config(:service_past_wait, env)
+      service_timeout = read_config(:service_timeout, env)
 
       time_started_service = Time.now                      # The wall time the request started being processed by rack
       ts_started_service   = fsecs                         # The monotonic time the request started being processed by rack
@@ -186,11 +204,16 @@ module Rack
       @state_change_observers.delete(id)
     end
 
-    private
     # Sends out the notifications. Called internally at the end of `_set_state!`
-    def self.notify_state_change_observers(env)
+    private_class_method def self.notify_state_change_observers(env)
       @state_change_observers.values.each { |observer| observer.call(env) }
     end
 
+    private
+
+    def read_config(variable_name, env)
+      value = instance_variable_get(:"@#{variable_name}")
+      value.respond_to?(:call) ? value.call(env) : value
+    end
   end
 end

@@ -20,4 +20,13 @@ class BasicTest < RackTimeoutTest
       get "/", "", 'HTTP_X_REQUEST_START' => time_in_msec(Time.now - 100)
     end
   end
+
+  def test_timeout_with_proc
+    self.settings = {
+      service_timeout: ->(env) { env ? 1 : 0 },
+    }
+    assert_raises(Rack::Timeout::RequestTimeoutError) do
+      get '/sleep'
+    end
+  end
 end
